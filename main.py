@@ -1,7 +1,10 @@
 from flask import Flask, request, jsonify
 from datetime import datetime, timezone, timedelta
+import requests
 
 app = Flask(__name__)
+
+APPS_SCRIPT_URL = "https://script.google.com/a/macros/shopee.com/s/AKfycbw2DxD1ACp8_UBkXEjf-u6uYn2QuD4jbdbMcavKFd8hqFmX3szeN10Tq80xJO8ROj-i/exec"
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -12,7 +15,6 @@ def webhook():
     print("ARGS:", request.args.to_dict())
     print("RAW:", request.get_data(as_text=True))
 
-    # GET 測試
     if request.method == "GET":
         challenge = request.args.get("seatalk_challenge")
         if challenge:
@@ -35,7 +37,6 @@ def webhook():
             "seatalk_challenge": challenge
         }), 200
 
-    # 處理 SeaTalk 訊息事件
     handle_seatalk_event(data)
 
     return jsonify({
@@ -74,13 +75,39 @@ def handle_seatalk_event(data):
     print("TEXT:", plain_text)
 
     if "維修完成" in plain_text:
+        completed_time = convert_timestamp_to_taipei(message_sent_time)
+
+        payload = {
+            "event_type": "repair_completed",
+            "group_id": group_id,
+            "thread_id": thread_id,
+            "message_id": message_id,
+            "sender_email": sender.get("email", ""),
+            "sender_employee_code": sender.get("employee_code", ""),
+            "message": plain_text,
+            "completed_time": completed_time,
+            "raw": data
+        }
+
         print(">>> DETECTED_REPAIR_COMPLETED <<<")
-        print("完成時間:", convert_timestamp_to_taipei(message_sent_time))
-        print("group_id:", group_id)
-        print("thread_id:", thread_id)
-        print("message_id:", message_id)
-        print("sender_email:", sender.get("email", ""))
-        print("message:", plain_text)
+        print(payload)
+
+        send_to_apps_script(payload)
+
+
+def send_to_apps_script(payload):
+    try:
+        response = requests.post(
+            APPS_SCRIPT_URL,
+            json=payload,
+            timeout=10
+        )
+
+        print("APPS_SCRIPT_STATUS:", response.status_code)
+        print("APPS_SCRIPT_RESPONSE:", response.text)
+
+    except Exception as e:
+        print("APPS_SCRIPT_ERROR:", str(e))
 
 
 def convert_timestamp_to_taipei(timestamp):
