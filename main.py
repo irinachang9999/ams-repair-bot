@@ -15,6 +15,7 @@ def webhook():
     print("ARGS:", request.args.to_dict())
     print("RAW:", request.get_data(as_text=True))
 
+    # GET 測試用
     if request.method == "GET":
         challenge = request.args.get("seatalk_challenge")
         if challenge:
@@ -25,7 +26,7 @@ def webhook():
     data = request.get_json(silent=True)
     print("JSON:", data)
 
-    # SeaTalk 驗證
+    # SeaTalk Event Callback 驗證
     if (
         data
         and "event" in data
@@ -33,10 +34,13 @@ def webhook():
         and "seatalk_challenge" in data["event"]
     ):
         challenge = data["event"]["seatalk_challenge"]
+        print("RETURN JSON CHALLENGE:", challenge)
+
         return jsonify({
             "seatalk_challenge": challenge
         }), 200
 
+    # 處理 SeaTalk 訊息事件
     handle_seatalk_event(data)
 
     return jsonify({
@@ -46,9 +50,10 @@ def webhook():
 
 def handle_seatalk_event(data):
     if not data:
+        print("NO DATA")
         return
 
-    event_type = data.get("event_type")
+    event_type = data.get("event_type", "")
     event = data.get("event", {})
 
     print("EVENT_TYPE:", event_type)
@@ -74,6 +79,7 @@ def handle_seatalk_event(data):
     print("MESSAGE_SENT_TIME:", message_sent_time)
     print("TEXT:", plain_text)
 
+    # 偵測維修完成
     if "維修完成" in plain_text:
         completed_time = convert_timestamp_to_taipei(message_sent_time)
 
@@ -90,7 +96,7 @@ def handle_seatalk_event(data):
         }
 
         print(">>> DETECTED_REPAIR_COMPLETED <<<")
-        print(payload)
+        print("PAYLOAD:", payload)
 
         send_to_apps_script(payload)
 
