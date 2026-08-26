@@ -2,25 +2,33 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
+
 @app.route("/", methods=["GET", "POST"])
 def webhook():
 
-    # GET 驗證
-    challenge = request.args.get("seatalk_challenge")
-    if challenge:
-        return challenge
-
+    # ===== GET =====
     if request.method == "GET":
-        return "Webhook Ready"
+        challenge = request.args.get("seatalk_challenge")
+        if challenge:
+            return challenge, 200
 
-    # POST 驗證
+        return "Webhook Ready", 200
+
+    # ===== POST =====
     data = request.get_json(silent=True)
 
-    if data and "seatalk_challenge" in data:
-        return data["seatalk_challenge"]
-
+    print("===== REQUEST =====")
     print(data)
 
+    # SeaTalk Event Verification
+    if (
+        data
+        and "event" in data
+        and "seatalk_challenge" in data["event"]
+    ):
+        return data["event"]["seatalk_challenge"], 200
+
+    # 一般事件
     return "OK", 200
 
 
