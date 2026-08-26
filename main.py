@@ -4,7 +4,7 @@ import requests
 
 app = Flask(__name__)
 
-APPS_SCRIPT_URL = "https://script.google.com/a/macros/shopee.com/s/AKfycbw2DxD1ACp8_UBkXEjf-u6uYn2QuD4jbdbMcavKFd8hqFmX3szeN10Tq80xJO8ROj-i/exec"
+APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw2DxD1ACp8_UBkXEjf-u6uYn2QuD4jbdbMcavKFd8hqFmX3szeN10Tq80xJO8ROj-i/exec"
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -110,7 +110,7 @@ def send_to_apps_script(payload):
         )
 
         print("APPS_SCRIPT_STATUS:", response.status_code)
-        print("APPS_SCRIPT_RESPONSE:", response.text)
+        print("APPS_SCRIPT_RESPONSE:", response.text[:1000])
 
     except Exception as e:
         print("APPS_SCRIPT_ERROR:", str(e))
