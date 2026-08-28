@@ -56,7 +56,7 @@ def get_seatalk_access_token():
                     "app_id": SEATALK_APP_ID,
                     "app_secret": SEATALK_APP_SECRET,
                 },
-                timeout=5,
+                timeout=10,
             )
 
             print("SEATALK_TOKEN_STATUS:", response.status_code)
@@ -77,13 +77,10 @@ def get_seatalk_access_token():
             if expire:
                 expires_at = int(expire)
             else:
-                expires_at = now + int(
-                    body.get("expires_in", 3600)
-                )
+                expires_at = now + int(body.get("expires_in", 3600))
 
             SEATALK_TOKEN = token
             SEATALK_TOKEN_EXPIRES_AT = expires_at
-
             return SEATALK_TOKEN
 
         except Exception as error:
@@ -100,37 +97,40 @@ def get_message_text(message):
     def collect(node):
         if isinstance(node, str):
             value = node.strip()
-
             if value:
                 parts.append(value)
+            return
 
-        elif isinstance(node, dict):
-            for key, value in node.items():
-                if key in (
-                    "plain_text",
-                    "content",
-                    "text",
-                    "interactive_message",
-                    "service_notice",
-                    "default",
-                    "elements",
-                    "element",
-                    "title",
-                    "description",
-                    "button",
-                    "button_group",
-                    "redirect",
-                    "mobile_link",
-                    "desktop_link",
-                    "path",
-                    "url",
-                    "href",
-                ):
-                    collect(value)
-
-        elif isinstance(node, list):
+        if isinstance(node, list):
             for item in node:
                 collect(item)
+            return
+
+        if not isinstance(node, dict):
+            return
+
+        for key, value in node.items():
+            if key in (
+                "plain_text",
+                "content",
+                "text",
+                "interactive_message",
+                "service_notice",
+                "default",
+                "elements",
+                "element",
+                "title",
+                "description",
+                "button",
+                "button_group",
+                "redirect",
+                "mobile_link",
+                "desktop_link",
+                "path",
+                "url",
+                "href",
+            ):
+                collect(value)
 
     collect(message.get("text", {}))
     collect(message.get("interactive_message", {}))
@@ -147,48 +147,40 @@ def get_message_text(message):
     return "\n".join(result)
 
 
-def extract_ams_no(text):
-    if not text:
-        return ""
-
+def extract_ams_no(*texts):
     patterns = (
         r"RR單號\s*[:：]?\s*(RR\d{6,})",
         r"(?:detail/|/)(RR\d{6,})(?:[/?\s]|$)",
         r"\b(RR\d{6,})\b",
     )
 
-    for pattern in patterns:
-        match = re.search(
-            pattern,
-            str(text),
-            re.IGNORECASE,
-        )
+    for text in texts:
+        if not text:
+            continue
 
-        if match:
-            return match.group(1).upper()
+        for pattern in patterns:
+            match = re.search(pattern, str(text), re.IGNORECASE)
+            if match:
+                return match.group(1).upper()
 
     return ""
 
 
-def extract_order_no(text):
-    if not text:
-        return ""
-
+def extract_order_no(*texts):
     patterns = (
         r"(?:事件影響訂單編號|訂單編號|訂單號碼)"
         r"\s*[:：]?\s*(TW\d{6,})",
         r"\b(TW\d{6,})\b",
     )
 
-    for pattern in patterns:
-        match = re.search(
-            pattern,
-            str(text),
-            re.IGNORECASE,
-        )
+    for text in texts:
+        if not text:
+            continue
 
-        if match:
-            return match.group(1).upper()
+        for pattern in patterns:
+            match = re.search(pattern, str(text), re.IGNORECASE)
+            if match:
+                return match.group(1).upper()
 
     return ""
 
@@ -197,51 +189,45 @@ def extract_single_line(text, labels):
     if not text:
         return ""
 
-    label_pattern = "|".join(
-        re.escape(label)
-        for label in labels
-    )
-
+    label_pattern = "|".join(re.escape(label) for label in labels)
     match = re.search(
         rf"(?:{label_pattern})\s*[:：]?\s*([^\r\n]+)",
         str(text),
         re.IGNORECASE,
     )
 
-    if not match:
-        return ""
-
-    return match.group(1).strip()
+    return match.group(1).strip() if match else ""
 
 
 def extract_multiline_field(text, labels):
     if not text:
         return ""
 
-    label_pattern = "|".join(
-        re.escape(label)
-        for label in labels
-    )
-
+    label_pattern = "|".join(re.escape(label) for label in labels)
     stop_labels = (
         "已解決",
         "是否解決",
+        "已解決?",
         "RR單號",
         "訂單編號",
+        "訂單號碼",
         "事件影響訂單編號",
         "回報時間",
+        "報修時間",
         "成立時間",
         "執行人員",
         "異常情形描述",
+        "問題描述",
+        "故障說明",
         "影響區域",
+        "櫃位號碼",
         "LockerID",
+        "Locker ID",
         "備註",
+        "查看詳情",
+        "上傳證明",
     )
-
-    stop_pattern = "|".join(
-        re.escape(label)
-        for label in stop_labels
-    )
+    stop_pattern = "|".join(re.escape(label) for label in stop_labels)
 
     match = re.search(
         rf"(?:{label_pattern})\s*[:：]?\s*"
@@ -255,9 +241,7 @@ def extract_multiline_field(text, labels):
         return ""
 
     value = match.group(1).strip()
-    value = re.sub(r"\s+", " ", value)
-
-    return value
+    return re.sub(r"\s+", " ", value)
 
 
 def extract_repair_method(text):
@@ -289,15 +273,10 @@ def convert_timestamp_to_taipei(timestamp):
             int(timestamp),
             tz=timezone.utc,
         )
-
         taipei_datetime = utc_datetime.astimezone(
             timezone(timedelta(hours=8))
         )
-
-        return taipei_datetime.strftime(
-            "%Y/%m/%d %H:%M:%S"
-        )
-
+        return taipei_datetime.strftime("%Y/%m/%d %H:%M:%S")
     except Exception as error:
         print("TIMESTAMP_ERROR:", str(error))
         return ""
@@ -312,16 +291,9 @@ def append_repair_event(payload):
             return False
 
         for old_event in REPAIR_EVENTS:
-            if (
-                event_id
-                and old_event.get("event_id") == event_id
-            ):
+            if event_id and old_event.get("event_id") == event_id:
                 return False
-
-            if (
-                message_id
-                and old_event.get("message_id") == message_id
-            ):
+            if message_id and old_event.get("message_id") == message_id:
                 return False
 
         REPAIR_EVENTS.append(payload)
@@ -333,7 +305,6 @@ def append_repair_event(payload):
         print("AMS_NO:", payload.get("ams_no"))
         print("ORDER_NO:", payload.get("order_no"))
         print("QUEUE_COUNT:", len(REPAIR_EVENTS))
-
         return True
 
 
@@ -350,12 +321,10 @@ def get_thread_messages(group_id, thread_id):
             params={
                 "group_id": group_id,
                 "thread_id": thread_id,
-                "page_size": 50,
+                "page_size": 100,
             },
-            headers={
-                "Authorization": f"Bearer {token}",
-            },
-            timeout=5,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
         )
 
         print("SEATALK_THREAD_STATUS:", response.status_code)
@@ -364,9 +333,10 @@ def get_thread_messages(group_id, thread_id):
             return [], f"http_{response.status_code}"
 
         body = response.json()
+        code = body.get("code")
 
-        if body.get("code") not in (None, 0, "0"):
-            return [], f"seatalk_code_{body.get('code')}"
+        if code not in (None, 0, "0"):
+            return [], f"seatalk_code_{code}"
 
         messages = body.get("thread_messages", [])
 
@@ -386,72 +356,97 @@ def find_root_message(messages):
 
     for message in messages:
         if (
-            message.get("message_id")
+            isinstance(message, dict)
             and message.get("message_id")
-            == message.get("thread_id")
+            and message.get("message_id") == message.get("thread_id")
         ):
             return message
 
-    return sorted(
-        messages,
-        key=lambda item: int(
-            item.get("message_sent_time", 0) or 0
-        ),
-    )[0]
+    valid_messages = [item for item in messages if isinstance(item, dict)]
+
+    if not valid_messages:
+        return {}
+
+    return min(
+        valid_messages,
+        key=lambda item: int(item.get("message_sent_time", 0) or 0),
+    )
+
+
+def parse_manual_group_ids():
+    return [
+        group_id.strip()
+        for group_id in re.split(r"[,;\s]+", SEATALK_GROUP_IDS)
+        if group_id.strip()
+    ]
 
 
 def get_group_ids():
-    if SEATALK_GROUP_IDS:
-        return [
-            group_id.strip()
-            for group_id in re.split(
-                r"[,;\s]+",
-                SEATALK_GROUP_IDS,
-            )
-            if group_id.strip()
-        ]
+    """Return (group_ids, error). The configured four IDs are preferred."""
+    manual_ids = list(dict.fromkeys(parse_manual_group_ids()))
+
+    if manual_ids:
+        print("SEATALK_CONFIGURED_GROUP_COUNT:", len(manual_ids))
+        return manual_ids, ""
 
     token = get_seatalk_access_token()
 
     if not token:
         return [], "access_token_not_available"
 
+    group_ids = []
+    cursor = ""
+    last_error = ""
+
     try:
-        response = requests.get(
-            f"{SEATALK_API_BASE}/messaging/v2/"
-            "group_chat/joined_list",
-            headers={
-                "Authorization": f"Bearer {token}",
-            },
-            timeout=5,
-        )
+        for _ in range(5):
+            params = {"page_size": 100}
 
-        print("SEATALK_GROUP_LIST_STATUS:", response.status_code)
+            if cursor:
+                params["cursor"] = cursor
 
-        if response.status_code != 200:
-            return [], f"http_{response.status_code}"
+            response = requests.get(
+                f"{SEATALK_API_BASE}/messaging/v2/group_chat/joined",
+                params=params,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
 
-        body = response.json()
+            print("SEATALK_GROUP_LIST_STATUS:", response.status_code)
 
-        group_items = (
-            body.get("group_list")
-            or body.get("group_chat_list")
-            or body.get("groups")
-            or []
-        )
+            if response.status_code != 200:
+                last_error = f"http_{response.status_code}"
+                break
 
-        group_ids = []
+            body = response.json()
+            code = body.get("code")
 
-        for item in group_items:
-            if isinstance(item, str):
-                group_ids.append(item)
-            elif isinstance(item, dict):
-                group_id = item.get("group_id")
+            if code not in (None, 0, "0"):
+                last_error = f"seatalk_code_{code}"
+                break
 
-                if group_id:
-                    group_ids.append(group_id)
+            joined = body.get("joined_group_chats", {})
 
-        return group_ids, ""
+            if isinstance(joined, dict):
+                current_ids = joined.get("group_id", [])
+                if isinstance(current_ids, list):
+                    group_ids.extend(
+                        str(group_id).strip()
+                        for group_id in current_ids
+                        if str(group_id).strip()
+                    )
+
+            cursor = body.get("next_cursor", "") or ""
+
+            if not cursor:
+                break
+
+        group_ids = list(dict.fromkeys(group_ids))
+
+        if group_ids:
+            return group_ids, ""
+
+        return [], last_error or "no_joined_groups"
 
     except Exception as error:
         print("SEATALK_GROUP_LIST_EXCEPTION:", str(error))
@@ -478,13 +473,10 @@ def get_group_chat_history(group_id):
                 params["cursor"] = cursor
 
             response = requests.get(
-                f"{SEATALK_API_BASE}/messaging/v2/"
-                "group_chat/history",
+                f"{SEATALK_API_BASE}/messaging/v2/group_chat/history",
                 params=params,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                },
-                timeout=8,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=12,
             )
 
             print(
@@ -497,16 +489,17 @@ def get_group_chat_history(group_id):
                 return [], f"http_{response.status_code}"
 
             body = response.json()
+            code = body.get("code")
 
-            if body.get("code") not in (None, 0, "0"):
-                return [], f"seatalk_code_{body.get('code')}"
+            if code not in (None, 0, "0"):
+                return [], f"seatalk_code_{code}"
 
             messages = body.get("chat_history", [])
 
             if isinstance(messages, list):
                 all_messages.extend(messages)
 
-            cursor = body.get("next_cursor", "")
+            cursor = body.get("next_cursor", "") or ""
 
             if not cursor:
                 break
@@ -524,29 +517,21 @@ def is_repair_report(text):
 
     text = str(text)
 
-    if "RR單號" in text:
+    if any(label in text for label in (
+        "RR單號",
+        "事件影響訂單編號",
+        "訂單編號",
+        "現場處理事項",
+    )):
         return True
 
-    if "事件影響訂單編號" in text:
-        return True
-
-    if (
-        "LockerID" in text
-        and (
-            "異常" in text
-            or "回報" in text
-            or "報修" in text
-        )
+    if "LockerID" in text and any(
+        word in text for word in ("異常", "回報", "報修")
     ):
         return True
 
-    if (
-        "維修" in text
-        and (
-            "回報" in text
-            or "報修" in text
-            or "異常" in text
-        )
+    if "維修" in text and any(
+        word in text for word in ("回報", "報修", "異常")
     ):
         return True
 
@@ -568,12 +553,8 @@ def build_history_record(group_id, message):
         return None
 
     sender = message.get("sender", {})
-
     if not isinstance(sender, dict):
         sender = {}
-
-    ams_no = extract_ams_no(text)
-    order_no = extract_order_no(text)
 
     return {
         "event_id": f"history:{group_id}:{message_id}",
@@ -581,51 +562,32 @@ def build_history_record(group_id, message):
         "event_type": "group_history",
         "repair_event_type": "repair_report",
         "group_id": group_id,
-        "thread_id": message.get(
-            "thread_id",
-            message_id,
-        ),
+        "thread_id": message.get("thread_id") or message_id,
         "message_id": message_id,
         "main_message_id": message_id,
         "sender_email": sender.get("email", ""),
-        "sender_employee_code": sender.get(
-            "employee_code",
-            "",
-        ),
+        "sender_employee_code": sender.get("employee_code", ""),
         "message": text,
         "plain_text": text,
         "main_message": text,
-        "ams_no": ams_no,
-        "order_no": order_no,
-        "locker_id": extract_single_line(
-            text,
-            ("LockerID", "Locker ID"),
-        ),
+        "ams_no": extract_ams_no(text),
+        "order_no": extract_order_no(text),
+        "locker_id": extract_single_line(text, ("LockerID", "Locker ID")),
         "report_time": extract_single_line(
             text,
             ("回報時間", "報修時間"),
         ),
         "issue_description": extract_single_line(
             text,
-            (
-                "異常情形描述",
-                "問題描述",
-                "故障說明",
-            ),
+            ("異常情形描述", "問題描述", "故障說明"),
         ),
         "affected_area": extract_single_line(
             text,
-            (
-                "影響區域",
-                "櫃位號碼",
-            ),
+            ("影響區域", "櫃位號碼"),
         ),
         "field_handling": extract_repair_method(text),
         "repair_method": extract_repair_method(text),
-        "message_sent_time": message.get(
-            "message_sent_time",
-            "",
-        ),
+        "message_sent_time": message.get("message_sent_time", ""),
         "completed_time": "",
         "thread_lookup_status": "history",
         "raw": message,
@@ -637,7 +599,7 @@ def sync_group_history():
 
     if group_error:
         return {
-            "groups": [],
+            "groups": group_ids,
             "queued": 0,
             "errors": [group_error],
         }
@@ -646,24 +608,20 @@ def sync_group_history():
     errors = []
 
     for group_id in group_ids:
-        messages, history_error = get_group_chat_history(
-            group_id
-        )
+        messages, history_error = get_group_chat_history(group_id)
 
         if history_error:
-            errors.append(
-                f"{group_id}: {history_error}"
-            )
+            errors.append(f"{group_id}: {history_error}")
             continue
 
         for message in messages:
-            record = build_history_record(
-                group_id,
-                message,
-            )
-
-            if record and append_repair_event(record):
-                queued += 1
+            try:
+                record = build_history_record(group_id, message)
+                if record and append_repair_event(record):
+                    queued += 1
+            except Exception as error:
+                print("HISTORY_RECORD_EXCEPTION:", group_id, str(error))
+                errors.append(f"{group_id}: record_error")
 
     return {
         "groups": group_ids,
@@ -686,27 +644,15 @@ def handle_seatalk_event(data):
 
     reply_text = get_message_text(message)
 
-    if not any(
-        keyword in reply_text
-        for keyword in COMPLETION_KEYWORDS
-    ):
+    if not any(keyword in reply_text for keyword in COMPLETION_KEYWORDS):
         return
 
     group_id = event.get("group_id", "")
-
-    thread_id = (
-        message.get("thread_id")
-        or event.get("thread_id", "")
-    )
-
+    thread_id = message.get("thread_id") or event.get("thread_id", "")
     message_id = message.get("message_id", "")
-    message_sent_time = message.get(
-        "message_sent_time",
-        "",
-    )
+    message_sent_time = message.get("message_sent_time", "")
 
     sender = message.get("sender", {})
-
     if not isinstance(sender, dict):
         sender = {}
 
@@ -721,36 +667,15 @@ def handle_seatalk_event(data):
         )
 
         if thread_messages:
-            root_message = find_root_message(
-                thread_messages
-            )
-
-            main_message_text = get_message_text(
-                root_message
-            )
-
-            main_message_id = root_message.get(
-                "message_id",
-                "",
-            )
-
+            root_message = find_root_message(thread_messages)
+            main_message_text = get_message_text(root_message)
+            main_message_id = root_message.get("message_id", "")
             thread_lookup_status = "success"
         else:
-            thread_lookup_status = (
-                thread_error
-                or "no_thread_messages"
-            )
+            thread_lookup_status = thread_error or "no_thread_messages"
 
-    ams_no = extract_ams_no(main_message_text)
-
-    if not ams_no:
-        ams_no = extract_ams_no(reply_text)
-
-    combined_text = (
-        main_message_text
-        + "\n"
-        + reply_text
-    )
+    combined_text = f"{main_message_text}\n{reply_text}"
+    ams_no = extract_ams_no(main_message_text, reply_text)
 
     event_id = (
         data.get("event_id")
@@ -768,10 +693,7 @@ def handle_seatalk_event(data):
         "message_id": message_id,
         "main_message_id": main_message_id,
         "sender_email": sender.get("email", ""),
-        "sender_employee_code": sender.get(
-            "employee_code",
-            "",
-        ),
+        "sender_employee_code": sender.get("employee_code", ""),
         "message": reply_text,
         "plain_text": reply_text,
         "main_message": main_message_text,
@@ -787,53 +709,33 @@ def handle_seatalk_event(data):
         ),
         "issue_description": extract_single_line(
             combined_text,
-            (
-                "異常情形描述",
-                "問題描述",
-                "故障說明",
-            ),
+            ("異常情形描述", "問題描述", "故障說明"),
         ),
         "affected_area": extract_single_line(
             combined_text,
-            (
-                "影響區域",
-                "櫃位號碼",
-            ),
+            ("影響區域", "櫃位號碼"),
         ),
-        "field_handling": extract_repair_method(
-            reply_text
-        ),
-        "repair_method": extract_repair_method(
-            reply_text
-        ),
+        "field_handling": extract_repair_method(combined_text),
+        "repair_method": extract_repair_method(combined_text),
         "message_sent_time": message_sent_time,
-        "completed_time": convert_timestamp_to_taipei(
-            message_sent_time
-        ),
+        "completed_time": convert_timestamp_to_taipei(message_sent_time),
         "thread_lookup_status": thread_lookup_status,
         "raw": data,
     }
 
     print("DETECTED_REPAIR_EVENT")
     print("AMS_NO:", ams_no)
-    print(
-        "THREAD_LOOKUP_STATUS:",
-        thread_lookup_status,
-    )
-
+    print("ORDER_NO:", payload["order_no"])
+    print("THREAD_LOOKUP_STATUS:", thread_lookup_status)
     append_repair_event(payload)
 
 
 @app.route("/", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
-        challenge = request.args.get(
-            "seatalk_challenge"
-        )
-
+        challenge = request.args.get("seatalk_challenge")
         if challenge:
             return challenge, 200
-
         return "Webhook Ready", 200
 
     data = request.get_json(silent=True)
@@ -843,38 +745,36 @@ def webhook():
 
     if "seatalk_challenge" in data:
         return jsonify({
-            "seatalk_challenge": data[
-                "seatalk_challenge"
-            ]
+            "seatalk_challenge": data["seatalk_challenge"]
         }), 200
 
     event = data.get("event", {})
 
-    if (
-        isinstance(event, dict)
-        and "seatalk_challenge" in event
-    ):
+    if isinstance(event, dict) and "seatalk_challenge" in event:
         return jsonify({
-            "seatalk_challenge": event[
-                "seatalk_challenge"
-            ]
+            "seatalk_challenge": event["seatalk_challenge"]
         }), 200
 
     handle_seatalk_event(data)
-
-    return jsonify({
-        "status": "ok"
-    }), 200
+    return jsonify({"status": "ok"}), 200
 
 
 @app.route("/sync-history", methods=["GET"])
 def sync_history():
-    result = sync_group_history()
-
-    return jsonify({
-        "status": "ok",
-        **result,
-    }), 200
+    try:
+        result = sync_group_history()
+        return jsonify({
+            "status": "ok",
+            **result,
+        }), 200
+    except Exception as error:
+        print("SYNC_HISTORY_EXCEPTION:", str(error))
+        return jsonify({
+            "status": "error",
+            "groups": [],
+            "queued": 0,
+            "errors": [str(error)],
+        }), 500
 
 
 @app.route("/events/peek", methods=["GET"])
@@ -905,9 +805,7 @@ def clear_events():
     with REPAIR_EVENTS_LOCK:
         REPAIR_EVENTS.clear()
 
-    return jsonify({
-        "status": "cleared"
-    }), 200
+    return jsonify({"status": "cleared"}), 200
 
 
 @app.route("/health", methods=["GET"])
@@ -916,11 +814,5 @@ def health():
 
 
 if __name__ == "__main__":
-    port = int(
-        os.getenv("PORT", "8080")
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port,
-    )
+    port = int(os.getenv("PORT", "8080"))
+    app.run(host="0.0.0.0", port=port)
