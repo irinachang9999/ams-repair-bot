@@ -1,30 +1,27 @@
 import os
+import threading
 from datetime import datetime, timezone, timedelta
 
-import requests
 from flask import Flask, request, jsonify
 
 
 app = Flask(__name__)
 
-# 從 Render Environment Variable 讀取
-APPS_SCRIPT_URL = (
-    os.getenv("APPS_SCRIPT_URL", "")
-    .strip()
-    .strip('"')
-    .strip("'")
+REPAIR_EVENTS = []
+REPAIR_EVENTS_LOCK = threading.Lock()
+
+COMPLETION_KEYWORDS = (
+    "維修完成",
+    "修復完成",
+    "已修復",
+    "已完成",
+    "處理完成",
+    "完修",
 )
 
 
 @app.route("/", methods=["GET", "POST"])
 def webhook():
-    print("=" * 50)
-    print("METHOD:", request.method)
-    print("PATH:", request.path)
-    print("ARGS:", request.args.to_dict())
-    print("RAW:", request.get_data(as_text=True))
-
-    # Render / 瀏覽器健康檢查
     if request.method == "GET":
         challenge = request.args.get("seatalk_challenge")
 
@@ -34,141 +31,173 @@ def webhook():
         return "Webhook Ready", 200
 
     data = request.get_json(silent=True)
+
+    print("=" * 50)
+    print("METHOD:", request.method)
+    print("PATH:", request.path)
     print("JSON:", data)
 
-    if not data:
-        print("NO DATA")
+    if not isinstance(data, dict):
         return jsonify({"status": "ok"}), 200
 
-    # SeaTalk Event Callback 驗證
-    event = data.get("event", {})
+    # SeaTalk callback 驗證
+    event_data = data.get("event", {})
 
     if (
-        isinstance(event, dict)
-        and "seatalk_challenge" in event
+        isinstance(event_data, dict)
+        and "seatalk_challenge" in event_data
     ):
-        challenge = event["seatalk_challenge"]
-
-        print("RETURN JSON CHALLENGE:", challenge)
-
         return jsonify({
-            "seatalk_challenge": challenge
+            "seatalk_challenge": event_data["seatalk_challenge"]
         }), 200
 
-    # 處理 SeaTalk 事件
+    # 接收並暫存維修完成事件
     handle_seatalk_event(data)
 
-    return jsonify({
-        "status": "ok"
-    }), 200
+    return jsonify({"status": "ok"}), 200
 
 
 def handle_seatalk_event(data):
     event_type = data.get("event_type", "")
-    event = data.get("event", {})
+    event_data = data.get("event", {})
 
-    if not isinstance(event, dict):
-        print("INVALID EVENT")
+    if not isinstance(event_data, dict):
         return
 
-    print("EVENT_TYPE:", event_type)
+    message = event_data.get("message", {})
 
-    message = event.get("message")
-
-    if not message:
-        print("NO MESSAGE EVENT")
+    if not isinstance(message, dict):
         return
 
-    group_id = event.get("group_id", "")
+    group_id = event_data.get("group_id", "")
     message_id = message.get("message_id", "")
     thread_id = message.get("thread_id", "")
-    sender = message.get("sender", {})
     message_sent_time = message.get("message_sent_time", "")
 
-    text_obj = message.get("text", {})
+    sender = message.get("sender", {})
 
-    if not isinstance(text_obj, dict):
-        text_obj = {}
+    if not isinstance(sender, dict):
+        sender = {}
+
+    text_data = message.get("text", {})
+
+    if not isinstance(text_data, dict):
+        text_data = {}
 
     plain_text = (
-        text_obj.get("plain_text")
-        or text_obj.get("content")
+        text_data.get("plain_text")
+        or text_data.get("content")
         or ""
     )
 
+    if not isinstance(plain_text, str):
+        plain_text = str(plain_text)
+
+    print("EVENT_TYPE:", event_type)
     print("GROUP_ID:", group_id)
     print("MESSAGE_ID:", message_id)
     print("THREAD_ID:", thread_id)
-    print("SENDER:", sender)
-    print("MESSAGE_SENT_TIME:", message_sent_time)
     print("TEXT:", plain_text)
 
-    # 偵測維修完成訊息
-    if "維修完成" not in plain_text:
+    # 只處理維修完成類訊息
+    if not any(
+        keyword in plain_text
+        for keyword in COMPLETION_KEYWORDS
+    ):
         print("NOT REPAIR COMPLETED")
         return
 
-    completed_time = convert_timestamp_to_taipei(message_sent_time)
+    completed_time = convert_timestamp_to_taipei(
+        message_sent_time
+    )
 
-    payload = {
-        "event_type": "repair_completed",
+    repair_event = {
+        "event_id": data.get("event_id", ""),
+        "event_type": event_type,
+        "repair_event_type": "repair_completed",
         "group_id": group_id,
         "thread_id": thread_id,
         "message_id": message_id,
         "sender_email": sender.get("email", ""),
-        "sender_employee_code": sender.get("employee_code", ""),
+        "sender_employee_code": sender.get(
+            "employee_code", ""
+        ),
         "message": plain_text,
+        "plain_text": plain_text,
+        "message_sent_time": message_sent_time,
         "completed_time": completed_time,
-        "raw": data
+        "raw": data,
     }
 
+    event_key = (
+        repair_event["event_id"]
+        or repair_event["message_id"]
+    )
+
+    with REPAIR_EVENTS_LOCK:
+        # 避免 SeaTalk 重送造成重複資料
+        if event_key:
+            for old_event in REPAIR_EVENTS:
+                old_key = (
+                    old_event.get("event_id")
+                    or old_event.get("message_id")
+                )
+
+                if old_key == event_key:
+                    print("DUPLICATE EVENT")
+                    return
+
+        REPAIR_EVENTS.append(repair_event)
+
     print(">>> DETECTED_REPAIR_COMPLETED <<<")
-    print("PAYLOAD:", payload)
-
-    send_to_apps_script(payload)
+    print("QUEUE_COUNT:", len(REPAIR_EVENTS))
 
 
-def send_to_apps_script(payload):
-    if not APPS_SCRIPT_URL:
-        print("APPS_SCRIPT_ERROR: APPS_SCRIPT_URL is not configured")
-        return
+@app.route("/events/peek", methods=["GET"])
+def peek_events():
+    with REPAIR_EVENTS_LOCK:
+        events = list(REPAIR_EVENTS)
 
-    print(
-        "APPS_SCRIPT_URL_CONFIGURED:",
-        bool(APPS_SCRIPT_URL)
-    )
+    return jsonify({
+        "count": len(events),
+        "events": events,
+    }), 200
 
-    print(
-        "APPS_SCRIPT_URL_IS_EXEC:",
-        APPS_SCRIPT_URL.endswith("/exec")
-    )
 
-    try:
-        response = requests.post(
-            APPS_SCRIPT_URL,
-            json=payload,
-            timeout=15
-        )
+@app.route("/events", methods=["GET"])
+def get_events():
+    # Apps Script 使用這個網址取資料，取出後清空佇列
+    with REPAIR_EVENTS_LOCK:
+        events = list(REPAIR_EVENTS)
+        REPAIR_EVENTS.clear()
 
-        print("APPS_SCRIPT_STATUS:", response.status_code)
+    return jsonify({
+        "count": len(events),
+        "events": events,
+    }), 200
 
-        # 避免把整段 Google HTML 錯誤頁寫進 Log
-        response_text = response.text[:500]
 
-        print("APPS_SCRIPT_RESPONSE:", response_text)
+@app.route("/events/clear", methods=["GET", "POST"])
+def clear_events():
+    with REPAIR_EVENTS_LOCK:
+        count = len(REPAIR_EVENTS)
+        REPAIR_EVENTS.clear()
 
-    except requests.exceptions.Timeout:
-        print("APPS_SCRIPT_ERROR: request timeout")
+    return jsonify({
+        "cleared": count,
+    }), 200
 
-    except requests.exceptions.RequestException as error:
-        print("APPS_SCRIPT_ERROR:", str(error))
 
-    except Exception as error:
-        print("APPS_SCRIPT_UNEXPECTED_ERROR:", str(error))
+@app.route("/health", methods=["GET"])
+def health():
+    return "OK", 200
 
 
 def convert_timestamp_to_taipei(timestamp):
     try:
+        if not timestamp:
+            return ""
+
         utc_datetime = datetime.fromtimestamp(
             int(timestamp),
             tz=timezone.utc
@@ -183,13 +212,8 @@ def convert_timestamp_to_taipei(timestamp):
         )
 
     except Exception as error:
-        print("TIMESTAMP_ERROR:", str(error))
+        print("TIMESTAMP_ERROR:", error)
         return ""
-
-
-@app.route("/health", methods=["GET"])
-def health():
-    return "OK", 200
 
 
 if __name__ == "__main__":
