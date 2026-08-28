@@ -21,6 +21,7 @@ SEATALK_APP_ID = os.getenv("SEATALK_APP_ID", "").strip()
 SEATALK_APP_SECRET = os.getenv("SEATALK_APP_SECRET", "").strip()
 SEATALK_API_BASE = "https://openapi.seatalk.io"
 
+
 COMPLETION_KEYWORDS = (
     "維修完成",
     "修復完成",
@@ -74,7 +75,9 @@ def get_seatalk_access_token():
             if expire:
                 expires_at = int(expire)
             else:
-                expires_at = now + int(body.get("expires_in", 3600))
+                expires_at = now + int(
+                    body.get("expires_in", 3600)
+                )
 
             SEATALK_TOKEN = token
             SEATALK_TOKEN_EXPIRES_AT = expires_at
@@ -87,14 +90,15 @@ def get_seatalk_access_token():
 
 
 def get_thread_messages(group_id, thread_id):
-    token = get_seatalk_access_token()
+    token = get_seatalK_access_token_safe()
 
     if not token:
         return [], "access_token_not_available"
 
     try:
         response = requests.get(
-            f"{SEATALK_API_BASE}/messaging/v2/group_chat/get_thread_by_thread_id",
+            f"{SEATALK_API_BASE}/messaging/v2/group_chat/"
+            "get_thread_by_thread_id",
             params={
                 "group_id": group_id,
                 "thread_id": thread_id,
@@ -128,38 +132,83 @@ def get_thread_messages(group_id, thread_id):
         return [], str(error)
 
 
+def get_seatalK_access_token_safe():
+    return get_seatalk_access_token()
+
+
 def get_message_text(message):
     if not isinstance(message, dict):
         return ""
 
-    text_obj = message.get("text", {})
+    parts = []
 
-    if not isinstance(text_obj, dict):
-        return ""
+    def collect(node):
+        if isinstance(node, str):
+            value = node.strip()
 
-    return (
-        text_obj.get("plain_text")
-        or text_obj.get("content")
-        or ""
-    )
+            if value:
+                parts.append(value)
+
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                if key in (
+                    "plain_text",
+                    "content",
+                    "text",
+                    "interactive_message",
+                    "service_notice",
+                    "default",
+                    "elements",
+                    "element",
+                    "title",
+                    "description",
+                    "button",
+                    "button_group",
+                    "redirect",
+                    "mobile_link",
+                    "desktop_link",
+                    "path",
+                    "url",
+                    "href",
+                ):
+                    collect(value)
+
+        elif isinstance(node, list):
+            for item in node:
+                collect(item)
+
+    collect(message.get("text", {}))
+    collect(message.get("interactive_message", {}))
+    collect(message.get("service_notice", {}))
+
+    result = []
+    seen = set()
+
+    for item in parts:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+
+    return "\n".join(result)
 
 
 def find_root_message(messages):
     if not messages:
         return {}
 
-    # 正常情況：主文的 thread_id 等於自己的 message_id
     for message in messages:
         if (
             message.get("message_id")
-            and message.get("message_id") == message.get("thread_id")
+            and message.get("message_id")
+            == message.get("thread_id")
         ):
             return message
 
-    # 如果 API 沒有提供明確主文，改取最早的一則
     return sorted(
         messages,
-        key=lambda item: int(item.get("message_sent_time", 0) or 0)
+        key=lambda item: int(
+            item.get("message_sent_time", 0) or 0
+        ),
     )[0]
 
 
@@ -175,7 +224,11 @@ def extract_ams_no(*texts):
             continue
 
         for pattern in patterns:
-            match = re.search(pattern, str(text), re.IGNORECASE)
+            match = re.search(
+                pattern,
+                str(text),
+                re.IGNORECASE,
+            )
 
             if match:
                 return match.group(1).upper()
@@ -194,7 +247,9 @@ def convert_timestamp_to_taipei(timestamp):
             timezone(timedelta(hours=8))
         )
 
-        return taipei_datetime.strftime("%Y/%m/%d %H:%M:%S")
+        return taipei_datetime.strftime(
+            "%Y/%m/%d %H:%M:%S"
+        )
 
     except Exception as error:
         print("TIMESTAMP_ERROR:", str(error))
@@ -207,15 +262,21 @@ def append_repair_event(payload):
 
     with REPAIR_EVENTS_LOCK:
         for old_event in REPAIR_EVENTS:
-            if event_id and old_event.get("event_id") == event_id:
+            if (
+                event_id
+                and old_event.get("event_id") == event_id
+            ):
                 return
 
-            if message_id and old_event.get("message_id") == message_id:
+            if (
+                message_id
+                and old_event.get("message_id") == message_id
+            ):
                 return
 
         REPAIR_EVENTS.append(payload)
 
-        print("EVENT_QUEUED:", payload.get("event_id"))
+        print("EVENT_QUEUED:", event_id)
         print("AMS_NO:", payload.get("ams_no"))
         print("QUEUE_COUNT:", len(REPAIR_EVENTS))
 
@@ -234,20 +295,27 @@ def handle_seatalk_event(data):
         print("NO_MESSAGE")
         return
 
-    text = get_message_text(message)
+    reply_text = get_message_text(message)
 
-    if not any(keyword in text for keyword in COMPLETION_KEYWORDS):
+    if not any(
+        keyword in reply_text
+        for keyword in COMPLETION_KEYWORDS
+    ):
         print("NOT_REPAIR_EVENT")
         return
 
     group_id = event.get("group_id", "")
+
     thread_id = (
         message.get("thread_id")
         or event.get("thread_id", "")
     )
 
     message_id = message.get("message_id", "")
-    message_sent_time = message.get("message_sent_time", "")
+    message_sent_time = message.get(
+        "message_sent_time",
+        "",
+    )
 
     sender = message.get("sender", {})
 
@@ -265,16 +333,29 @@ def handle_seatalk_event(data):
         )
 
         if thread_messages:
-            root_message = find_root_message(thread_messages)
-            main_message_text = get_message_text(root_message)
-            main_message_id = root_message.get("message_id", "")
+            root_message = find_root_message(
+                thread_messages
+            )
+
+            main_message_text = get_message_text(
+                root_message
+            )
+
+            main_message_id = root_message.get(
+                "message_id",
+                "",
+            )
+
             thread_lookup_status = "success"
         else:
-            thread_lookup_status = thread_error or "no_thread_messages"
+            thread_lookup_status = (
+                thread_error
+                or "no_thread_messages"
+            )
 
     ams_no = extract_ams_no(
         main_message_text,
-        text,
+        reply_text,
     )
 
     event_id = (
@@ -292,9 +373,12 @@ def handle_seatalk_event(data):
         "message_id": message_id,
         "main_message_id": main_message_id,
         "sender_email": sender.get("email", ""),
-        "sender_employee_code": sender.get("employee_code", ""),
-        "message": text,
-        "plain_text": text,
+        "sender_employee_code": sender.get(
+            "employee_code",
+            "",
+        ),
+        "message": reply_text,
+        "plain_text": reply_text,
         "main_message": main_message_text,
         "ams_no": ams_no,
         "message_sent_time": message_sent_time,
@@ -307,8 +391,14 @@ def handle_seatalk_event(data):
 
     print("DETECTED_REPAIR_EVENT")
     print("AMS_NO:", ams_no)
-    print("MAIN_MESSAGE:", main_message_text[:300])
-    print("THREAD_LOOKUP_STATUS:", thread_lookup_status)
+    print(
+        "MAIN_MESSAGE:",
+        main_message_text[:500],
+    )
+    print(
+        "THREAD_LOOKUP_STATUS:",
+        thread_lookup_status,
+    )
 
     append_repair_event(payload)
 
@@ -316,7 +406,9 @@ def handle_seatalk_event(data):
 @app.route("/", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
-        challenge = request.args.get("seatalk_challenge")
+        challenge = request.args.get(
+            "seatalk_challenge"
+        )
 
         if challenge:
             return challenge, 200
@@ -328,6 +420,13 @@ def webhook():
     if not data:
         return jsonify({"status": "ok"}), 200
 
+    if "seatalk_challenge" in data:
+        return jsonify({
+            "seatalk_challenge": data[
+                "seatalk_challenge"
+            ]
+        }), 200
+
     event = data.get("event", {})
 
     if (
@@ -335,7 +434,9 @@ def webhook():
         and "seatalk_challenge" in event
     ):
         return jsonify({
-            "seatalk_challenge": event["seatalk_challenge"]
+            "seatalk_challenge": event[
+                "seatalk_challenge"
+            ]
         }), 200
 
     handle_seatalk_event(data)
@@ -384,7 +485,9 @@ def health():
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8080"))
+    port = int(
+        os.getenv("PORT", "8080")
+    )
 
     app.run(
         host="0.0.0.0",
