@@ -12,6 +12,7 @@ app = Flask(__name__)
 
 REPAIR_EVENTS = []
 REPAIR_EVENTS_LOCK = threading.Lock()
+SEEN_EVENT_IDS = set()
 
 TOKEN_LOCK = threading.Lock()
 SEATALK_TOKEN = ""
@@ -19,6 +20,7 @@ SEATALK_TOKEN_EXPIRES_AT = 0
 
 SEATALK_APP_ID = os.getenv("SEATALK_APP_ID", "").strip()
 SEATALK_APP_SECRET = os.getenv("SEATALK_APP_SECRET", "").strip()
+SEATALK_GROUP_IDS = os.getenv("SEATALK_GROUP_IDS", "").strip()
 SEATALK_API_BASE = "https://openapi.seatalk.io"
 
 
@@ -54,7 +56,7 @@ def get_seatalk_access_token():
                     "app_id": SEATALK_APP_ID,
                     "app_secret": SEATALK_APP_SECRET,
                 },
-                timeout=4,
+                timeout=5,
             )
 
             print("SEATALK_TOKEN_STATUS:", response.status_code)
@@ -87,53 +89,6 @@ def get_seatalk_access_token():
         except Exception as error:
             print("SEATALK_TOKEN_EXCEPTION:", str(error))
             return ""
-
-
-def get_thread_messages(group_id, thread_id):
-    token = get_seatalK_access_token_safe()
-
-    if not token:
-        return [], "access_token_not_available"
-
-    try:
-        response = requests.get(
-            f"{SEATALK_API_BASE}/messaging/v2/group_chat/"
-            "get_thread_by_thread_id",
-            params={
-                "group_id": group_id,
-                "thread_id": thread_id,
-                "page_size": 50,
-            },
-            headers={
-                "Authorization": f"Bearer {token}",
-            },
-            timeout=4,
-        )
-
-        print("SEATALK_THREAD_STATUS:", response.status_code)
-
-        if response.status_code != 200:
-            return [], f"http_{response.status_code}"
-
-        body = response.json()
-
-        if body.get("code") not in (None, 0):
-            return [], f"seatalk_code_{body.get('code')}"
-
-        messages = body.get("thread_messages", [])
-
-        if not isinstance(messages, list):
-            return [], "thread_messages_invalid"
-
-        return messages, ""
-
-    except Exception as error:
-        print("SEATALK_THREAD_EXCEPTION:", str(error))
-        return [], str(error)
-
-
-def get_seatalK_access_token_safe():
-    return get_seatalk_access_token()
 
 
 def get_message_text(message):
@@ -192,48 +147,140 @@ def get_message_text(message):
     return "\n".join(result)
 
 
-def find_root_message(messages):
-    if not messages:
-        return {}
+def extract_ams_no(text):
+    if not text:
+        return ""
 
-    for message in messages:
-        if (
-            message.get("message_id")
-            and message.get("message_id")
-            == message.get("thread_id")
-        ):
-            return message
-
-    return sorted(
-        messages,
-        key=lambda item: int(
-            item.get("message_sent_time", 0) or 0
-        ),
-    )[0]
-
-
-def extract_ams_no(*texts):
     patterns = (
         r"RR單號\s*[:：]?\s*(RR\d{6,})",
         r"(?:detail/|/)(RR\d{6,})(?:[/?\s]|$)",
         r"\b(RR\d{6,})\b",
     )
 
-    for text in texts:
-        if not text:
-            continue
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            str(text),
+            re.IGNORECASE,
+        )
 
-        for pattern in patterns:
-            match = re.search(
-                pattern,
-                str(text),
-                re.IGNORECASE,
-            )
-
-            if match:
-                return match.group(1).upper()
+        if match:
+            return match.group(1).upper()
 
     return ""
+
+
+def extract_order_no(text):
+    if not text:
+        return ""
+
+    patterns = (
+        r"(?:事件影響訂單編號|訂單編號|訂單號碼)"
+        r"\s*[:：]?\s*(TW\d{6,})",
+        r"\b(TW\d{6,})\b",
+    )
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            str(text),
+            re.IGNORECASE,
+        )
+
+        if match:
+            return match.group(1).upper()
+
+    return ""
+
+
+def extract_single_line(text, labels):
+    if not text:
+        return ""
+
+    label_pattern = "|".join(
+        re.escape(label)
+        for label in labels
+    )
+
+    match = re.search(
+        rf"(?:{label_pattern})\s*[:：]?\s*([^\r\n]+)",
+        str(text),
+        re.IGNORECASE,
+    )
+
+    if not match:
+        return ""
+
+    return match.group(1).strip()
+
+
+def extract_multiline_field(text, labels):
+    if not text:
+        return ""
+
+    label_pattern = "|".join(
+        re.escape(label)
+        for label in labels
+    )
+
+    stop_labels = (
+        "已解決",
+        "是否解決",
+        "RR單號",
+        "訂單編號",
+        "事件影響訂單編號",
+        "回報時間",
+        "成立時間",
+        "執行人員",
+        "異常情形描述",
+        "影響區域",
+        "LockerID",
+        "備註",
+    )
+
+    stop_pattern = "|".join(
+        re.escape(label)
+        for label in stop_labels
+    )
+
+    match = re.search(
+        rf"(?:{label_pattern})\s*[:：]?\s*"
+        rf"([\s\S]*?)"
+        rf"(?=\n\s*(?:{stop_pattern})\s*[:：]?|\Z)",
+        str(text),
+        re.IGNORECASE,
+    )
+
+    if not match:
+        return ""
+
+    value = match.group(1).strip()
+    value = re.sub(r"\s+", " ", value)
+
+    return value
+
+
+def extract_repair_method(text):
+    value = extract_multiline_field(
+        text,
+        (
+            "維修方式",
+            "修復方式",
+            "現場處理事項",
+        ),
+    )
+
+    if value:
+        return value
+
+    return extract_single_line(
+        text,
+        (
+            "維修方式",
+            "修復方式",
+            "現場處理事項",
+        ),
+    )
 
 
 def convert_timestamp_to_taipei(timestamp):
@@ -261,24 +308,368 @@ def append_repair_event(payload):
     message_id = payload.get("message_id", "")
 
     with REPAIR_EVENTS_LOCK:
+        if event_id and event_id in SEEN_EVENT_IDS:
+            return False
+
         for old_event in REPAIR_EVENTS:
             if (
                 event_id
                 and old_event.get("event_id") == event_id
             ):
-                return
+                return False
 
             if (
                 message_id
                 and old_event.get("message_id") == message_id
             ):
-                return
+                return False
 
         REPAIR_EVENTS.append(payload)
 
+        if event_id:
+            SEEN_EVENT_IDS.add(event_id)
+
         print("EVENT_QUEUED:", event_id)
         print("AMS_NO:", payload.get("ams_no"))
+        print("ORDER_NO:", payload.get("order_no"))
         print("QUEUE_COUNT:", len(REPAIR_EVENTS))
+
+        return True
+
+
+def get_thread_messages(group_id, thread_id):
+    token = get_seatalk_access_token()
+
+    if not token:
+        return [], "access_token_not_available"
+
+    try:
+        response = requests.get(
+            f"{SEATALK_API_BASE}/messaging/v2/"
+            "group_chat/get_thread_by_thread_id",
+            params={
+                "group_id": group_id,
+                "thread_id": thread_id,
+                "page_size": 50,
+            },
+            headers={
+                "Authorization": f"Bearer {token}",
+            },
+            timeout=5,
+        )
+
+        print("SEATALK_THREAD_STATUS:", response.status_code)
+
+        if response.status_code != 200:
+            return [], f"http_{response.status_code}"
+
+        body = response.json()
+
+        if body.get("code") not in (None, 0, "0"):
+            return [], f"seatalk_code_{body.get('code')}"
+
+        messages = body.get("thread_messages", [])
+
+        if not isinstance(messages, list):
+            return [], "thread_messages_invalid"
+
+        return messages, ""
+
+    except Exception as error:
+        print("SEATALK_THREAD_EXCEPTION:", str(error))
+        return [], str(error)
+
+
+def find_root_message(messages):
+    if not messages:
+        return {}
+
+    for message in messages:
+        if (
+            message.get("message_id")
+            and message.get("message_id")
+            == message.get("thread_id")
+        ):
+            return message
+
+    return sorted(
+        messages,
+        key=lambda item: int(
+            item.get("message_sent_time", 0) or 0
+        ),
+    )[0]
+
+
+def get_group_ids():
+    if SEATALK_GROUP_IDS:
+        return [
+            group_id.strip()
+            for group_id in re.split(
+                r"[,;\s]+",
+                SEATALK_GROUP_IDS,
+            )
+            if group_id.strip()
+        ]
+
+    token = get_seatalk_access_token()
+
+    if not token:
+        return [], "access_token_not_available"
+
+    try:
+        response = requests.get(
+            f"{SEATALK_API_BASE}/messaging/v2/"
+            "group_chat/joined_list",
+            headers={
+                "Authorization": f"Bearer {token}",
+            },
+            timeout=5,
+        )
+
+        print("SEATALK_GROUP_LIST_STATUS:", response.status_code)
+
+        if response.status_code != 200:
+            return [], f"http_{response.status_code}"
+
+        body = response.json()
+
+        group_items = (
+            body.get("group_list")
+            or body.get("group_chat_list")
+            or body.get("groups")
+            or []
+        )
+
+        group_ids = []
+
+        for item in group_items:
+            if isinstance(item, str):
+                group_ids.append(item)
+            elif isinstance(item, dict):
+                group_id = item.get("group_id")
+
+                if group_id:
+                    group_ids.append(group_id)
+
+        return group_ids, ""
+
+    except Exception as error:
+        print("SEATALK_GROUP_LIST_EXCEPTION:", str(error))
+        return [], str(error)
+
+
+def get_group_chat_history(group_id):
+    token = get_seatalk_access_token()
+
+    if not token:
+        return [], "access_token_not_available"
+
+    all_messages = []
+    cursor = ""
+
+    try:
+        for _ in range(5):
+            params = {
+                "group_id": group_id,
+                "page_size": 100,
+            }
+
+            if cursor:
+                params["cursor"] = cursor
+
+            response = requests.get(
+                f"{SEATALK_API_BASE}/messaging/v2/"
+                "group_chat/history",
+                params=params,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                },
+                timeout=8,
+            )
+
+            print(
+                "SEATALK_HISTORY_STATUS:",
+                group_id,
+                response.status_code,
+            )
+
+            if response.status_code != 200:
+                return [], f"http_{response.status_code}"
+
+            body = response.json()
+
+            if body.get("code") not in (None, 0, "0"):
+                return [], f"seatalk_code_{body.get('code')}"
+
+            messages = body.get("chat_history", [])
+
+            if isinstance(messages, list):
+                all_messages.extend(messages)
+
+            cursor = body.get("next_cursor", "")
+
+            if not cursor:
+                break
+
+        return all_messages, ""
+
+    except Exception as error:
+        print("SEATALK_HISTORY_EXCEPTION:", str(error))
+        return [], str(error)
+
+
+def is_repair_report(text):
+    if not text:
+        return False
+
+    text = str(text)
+
+    if "RR單號" in text:
+        return True
+
+    if "事件影響訂單編號" in text:
+        return True
+
+    if (
+        "LockerID" in text
+        and (
+            "異常" in text
+            or "回報" in text
+            or "報修" in text
+        )
+    ):
+        return True
+
+    if (
+        "維修" in text
+        and (
+            "回報" in text
+            or "報修" in text
+            or "異常" in text
+        )
+    ):
+        return True
+
+    return False
+
+
+def build_history_record(group_id, message):
+    if not isinstance(message, dict):
+        return None
+
+    message_id = message.get("message_id", "")
+
+    if not message_id:
+        return None
+
+    text = get_message_text(message)
+
+    if not is_repair_report(text):
+        return None
+
+    sender = message.get("sender", {})
+
+    if not isinstance(sender, dict):
+        sender = {}
+
+    ams_no = extract_ams_no(text)
+    order_no = extract_order_no(text)
+
+    return {
+        "event_id": f"history:{group_id}:{message_id}",
+        "source_type": "group_history",
+        "event_type": "group_history",
+        "repair_event_type": "repair_report",
+        "group_id": group_id,
+        "thread_id": message.get(
+            "thread_id",
+            message_id,
+        ),
+        "message_id": message_id,
+        "main_message_id": message_id,
+        "sender_email": sender.get("email", ""),
+        "sender_employee_code": sender.get(
+            "employee_code",
+            "",
+        ),
+        "message": text,
+        "plain_text": text,
+        "main_message": text,
+        "ams_no": ams_no,
+        "order_no": order_no,
+        "locker_id": extract_single_line(
+            text,
+            ("LockerID", "Locker ID"),
+        ),
+        "report_time": extract_single_line(
+            text,
+            ("回報時間", "報修時間"),
+        ),
+        "issue_description": extract_single_line(
+            text,
+            (
+                "異常情形描述",
+                "問題描述",
+                "故障說明",
+            ),
+        ),
+        "affected_area": extract_single_line(
+            text,
+            (
+                "影響區域",
+                "櫃位號碼",
+            ),
+        ),
+        "field_handling": extract_repair_method(text),
+        "repair_method": extract_repair_method(text),
+        "message_sent_time": message.get(
+            "message_sent_time",
+            "",
+        ),
+        "completed_time": "",
+        "thread_lookup_status": "history",
+        "raw": message,
+    }
+
+
+def sync_group_history():
+    group_ids, group_error = get_group_ids()
+
+    if group_error:
+        return {
+            "groups": [],
+            "queued": 0,
+            "errors": [group_error],
+        }
+
+    queued = 0
+    errors = []
+
+    for group_id in group_ids:
+        messages, history_error = get_group_chat_history(
+            group_id
+        )
+
+        if history_error:
+            errors.append(
+                f"{group_id}: {history_error}"
+            )
+            continue
+
+        for message in messages:
+            record = build_history_record(
+                group_id,
+                message,
+            )
+
+            if record and append_repair_event(record):
+                queued += 1
+
+    return {
+        "groups": group_ids,
+        "queued": queued,
+        "errors": errors,
+    }
 
 
 def handle_seatalk_event(data):
@@ -286,13 +677,11 @@ def handle_seatalk_event(data):
     event = data.get("event", {})
 
     if not isinstance(event, dict):
-        print("INVALID_EVENT")
         return
 
     message = event.get("message", {})
 
     if not isinstance(message, dict):
-        print("NO_MESSAGE")
         return
 
     reply_text = get_message_text(message)
@@ -301,7 +690,6 @@ def handle_seatalk_event(data):
         keyword in reply_text
         for keyword in COMPLETION_KEYWORDS
     ):
-        print("NOT_REPAIR_EVENT")
         return
 
     group_id = event.get("group_id", "")
@@ -353,9 +741,15 @@ def handle_seatalk_event(data):
                 or "no_thread_messages"
             )
 
-    ams_no = extract_ams_no(
-        main_message_text,
-        reply_text,
+    ams_no = extract_ams_no(main_message_text)
+
+    if not ams_no:
+        ams_no = extract_ams_no(reply_text)
+
+    combined_text = (
+        main_message_text
+        + "\n"
+        + reply_text
     )
 
     event_id = (
@@ -366,6 +760,7 @@ def handle_seatalk_event(data):
 
     payload = {
         "event_id": event_id,
+        "source_type": "webhook",
         "event_type": event_type,
         "repair_event_type": "repair_completed",
         "group_id": group_id,
@@ -381,6 +776,36 @@ def handle_seatalk_event(data):
         "plain_text": reply_text,
         "main_message": main_message_text,
         "ams_no": ams_no,
+        "order_no": extract_order_no(combined_text),
+        "locker_id": extract_single_line(
+            combined_text,
+            ("LockerID", "Locker ID"),
+        ),
+        "report_time": extract_single_line(
+            combined_text,
+            ("回報時間", "報修時間"),
+        ),
+        "issue_description": extract_single_line(
+            combined_text,
+            (
+                "異常情形描述",
+                "問題描述",
+                "故障說明",
+            ),
+        ),
+        "affected_area": extract_single_line(
+            combined_text,
+            (
+                "影響區域",
+                "櫃位號碼",
+            ),
+        ),
+        "field_handling": extract_repair_method(
+            reply_text
+        ),
+        "repair_method": extract_repair_method(
+            reply_text
+        ),
         "message_sent_time": message_sent_time,
         "completed_time": convert_timestamp_to_taipei(
             message_sent_time
@@ -391,10 +816,6 @@ def handle_seatalk_event(data):
 
     print("DETECTED_REPAIR_EVENT")
     print("AMS_NO:", ams_no)
-    print(
-        "MAIN_MESSAGE:",
-        main_message_text[:500],
-    )
     print(
         "THREAD_LOOKUP_STATUS:",
         thread_lookup_status,
@@ -443,6 +864,16 @@ def webhook():
 
     return jsonify({
         "status": "ok"
+    }), 200
+
+
+@app.route("/sync-history", methods=["GET"])
+def sync_history():
+    result = sync_group_history()
+
+    return jsonify({
+        "status": "ok",
+        **result,
     }), 200
 
 
